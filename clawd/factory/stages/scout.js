@@ -23,25 +23,28 @@ const DEFAULT_SCOUT_PROMPT = `You are scouting for MCP tool app ideas. Evaluate 
 
 Return JSON array of ideas with scores.`
 
-function buildRedditUrls(subreddits) {
+function buildRedditCommands(subreddits) {
   return subreddits.map(sub =>
-    `https://old.reddit.com/r/${sub}/top/?t=week`
+    `curl -s "https://www.reddit.com/r/${sub}/top.json?t=week&limit=25" -H "User-Agent: ScaffoldScout/1.0"`
   )
 }
 
-function buildHackerNewsUrls() {
+function buildHackerNewsCommands() {
   return [
-    'https://news.ycombinator.com/show',
-    'https://news.ycombinator.com/ask'
+    // Show HN: fetch top 30 story IDs, then fetch first 10 stories
+    `curl -s "https://hacker-news.firebaseio.com/v0/showstories.json" | head -c 200`,
+    // Ask HN: fetch top 30 story IDs, then fetch first 10 stories
+    `curl -s "https://hacker-news.firebaseio.com/v0/askstories.json" | head -c 200`,
   ]
 }
 
 /**
- * Run the scouting stage using the agent's browser tools.
+ * Run the scouting stage using curl to fetch Reddit/HN JSON APIs.
+ * No browser required — uses Reddit's .json endpoints and HN's Firebase API.
  *
  * @param {Object} agent - ClaudeAgent instance
  * @param {string} cycleId - Current cycle ID
- * @param {Object} mcpServers - MCP servers including browser
+ * @param {Object} mcpServers - MCP servers
  * @returns {Object} scouting results
  */
 export async function runScout(agent, cycleId, mcpServers) {
@@ -49,49 +52,77 @@ export async function runScout(agent, cycleId, mcpServers) {
   const cycle = store.getCycle(cycleId)
   if (!cycle) throw new Error(`Cycle ${cycleId} not found`)
 
-  const urls = []
+  const redditCommands = []
+  const hnCommands = []
 
   // Reddit sources
   if (config.scoutSources.reddit?.length) {
-    urls.push(...buildRedditUrls(config.scoutSources.reddit))
+    redditCommands.push(...buildRedditCommands(config.scoutSources.reddit))
   }
 
   // Hacker News sources
   if (config.scoutSources.hackerNews) {
-    urls.push(...buildHackerNewsUrls())
+    hnCommands.push(...buildHackerNewsCommands())
   }
 
   const existingApps = config.existingApps.join(', ')
   const scoutPrompt = getScoutPrompt()
 
-  const urlList = urls.map((u, i) => `${i + 1}. ${u}`).join('\n')
+  const redditSection = redditCommands.length ? `### Reddit
 
-  const message = `You are the Scout stage of the Scaffold App Factory. Your job is to find ideas for new MCP tool apps.
+Fetch top posts from each subreddit using curl. The Reddit JSON API returns posts at any reddit URL by appending .json:
+
+${redditCommands.map((cmd, i) => `${i + 1}. \`${cmd}\``).join('\n')}
+
+Parse the response: \`response.data.children[].data\` contains \`{title, selftext, score, num_comments, permalink, url}\`.
+
+Use jq to extract relevant fields:
+\`\`\`
+curl -s "https://www.reddit.com/r/SUBREDDIT/top.json?t=week&limit=25" -H "User-Agent: ScaffoldScout/1.0" | jq '.data.children[].data | {title, selftext: .selftext[:200], score, num_comments, permalink}'
+\`\`\`
+` : ''
+
+  const hnSection = hnCommands.length ? `### Hacker News
+
+HN has a Firebase JSON API. Fetch story IDs, then fetch individual stories:
+
+1. Get Show HN story IDs: \`curl -s "https://hacker-news.firebaseio.com/v0/showstories.json"\`
+2. Get Ask HN story IDs: \`curl -s "https://hacker-news.firebaseio.com/v0/askstories.json"\`
+3. Fetch individual story: \`curl -s "https://hacker-news.firebaseio.com/v0/item/{id}.json"\`
+
+Each story has: \`{title, text, score, descendants (comment count), url}\`.
+
+Fetch the top 10 stories from each list (Show HN + Ask HN).
+` : ''
+
+  const message = `You are the Scout stage of the Scaffold App Factory. Your job is to find ideas for new MCP tool apps by researching Reddit and Hacker News.
 
 ## Instructions
 
 ${scoutPrompt}
 
-## URLs to Scrape
+## Data Sources
 
-Visit each of these URLs using browser tools (browser_navigate + browser_snapshot). Extract posts/discussions that suggest MCP tool app ideas:
+Use \`exec\` or shell commands to run curl and jq. Do NOT use browser tools — use the JSON APIs directly.
 
-${urlList}
+${redditSection}
+${hnSection}
 
 ## Existing Apps (avoid duplicating these)
 ${existingApps}
 
 ## Process
 
-1. Navigate to each URL and take a snapshot
-2. Look for posts where people express needs, frustrations, or "I wish..." sentiments that could be solved by an MCP tool
-3. Extract the top ideas you find
-4. Score each idea on: feasibility (1-5), mcp_fit (1-5), demand_signal (1-5), uniqueness (1-5)
-5. Rank by total score (sum of all 4 criteria, max 20)
+1. Fetch posts from each source using curl commands above
+2. Parse the JSON responses with jq to extract titles, descriptions, scores
+3. Look for posts where people express needs, frustrations, or "I wish..." sentiments that could be solved by an MCP tool
+4. Extract the top ideas you find
+5. Score each idea on: feasibility (1-5), mcp_fit (1-5), demand_signal (1-5), uniqueness (1-5)
+6. Rank by total score (sum of all 4 criteria, max 20)
 
 ## Output Format
 
-After scraping all sources, respond with EXACTLY this JSON structure (no other text):
+After analyzing all sources, respond with EXACTLY this JSON structure (no other text):
 
 \`\`\`json
 {
@@ -108,7 +139,7 @@ After scraping all sources, respond with EXACTLY this JSON structure (no other t
         "uniqueness": 4
       },
       "totalScore": 16,
-      "suggestedTools": ["tool1:action", "tool2:action"]
+      "suggestedTools": ["tool1_action", "tool2_action"]
     }
   ]
 }
@@ -116,8 +147,9 @@ After scraping all sources, respond with EXACTLY this JSON structure (no other t
 
 Return exactly 5 ideas ranked by total score (highest first). Only include ideas scoring 12 or higher.`
 
+  const sourceCount = redditCommands.length + hnCommands.length
   console.log('[Factory Scout] Starting scouting run...')
-  console.log(`[Factory Scout] Scraping ${urls.length} sources...`)
+  console.log(`[Factory Scout] Fetching from ${sourceCount} sources...`)
 
   const sessionKey = `factory:scout:${cycleId}`
 
