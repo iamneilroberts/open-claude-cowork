@@ -4,7 +4,11 @@ You are generating a complete, working MCP tool app that runs locally with Node.
 
 ## Architecture
 
-A Scaffold app is a Node.js server that exposes MCP (Model Context Protocol) tools over HTTP. It uses file-based JSON storage on disk — no cloud services, no external databases.
+A Scaffold app is an MCP (Model Context Protocol) server that exposes tools to AI chat clients like Claude Desktop, Claude Code, Cursor, etc. The user's chat client provides the AI — the app just provides tools for it to call. Data is stored as JSON files on disk — no cloud services, no external databases.
+
+The app has two entry points:
+- **`src/mcp.ts`** — Primary. MCP server over stdio, used by chat clients.
+- **`src/serve.ts`** — Secondary. HTTP server for development and testing with curl.
 
 ### Tool Interface
 
@@ -16,7 +20,7 @@ interface ScaffoldTool {
   description: string    // Clear description for LLM consumption
   inputSchema: {         // JSON Schema for tool parameters
     type: 'object'
-    properties: Record<string, { type: string; description: string }>
+    properties: Record<string, { type: string; description: string; enum?: string[] }>
     required?: string[]
   }
   handler: (input: any, ctx: ToolContext) => Promise<ToolResult>
@@ -105,17 +109,150 @@ export const createNote: ScaffoldTool = {
 ```
 scaffold/examples/<app-name>/
   package.json
+  README.md
   tsconfig.json
   src/
-    serve.ts         # Local server entry point (file storage + HTTP)
+    mcp.ts           # MCP stdio server (primary — used by chat clients)
+    serve.ts         # HTTP server (secondary — for dev/testing)
     tools.ts         # All tool implementations
     __tests__/
       tools.test.ts  # Vitest tests for all tools
 ```
 
+## MCP Entry Point (src/mcp.ts)
+
+The mcp.ts file registers tools with the MCP SDK and communicates over stdio. It converts JSON Schema properties to Zod schemas for the SDK, and includes the same inline file storage as serve.ts.
+
+```typescript
+import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
+import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
+import { z } from 'zod'
+import { readFile, writeFile, mkdir, readdir, unlink } from 'node:fs/promises'
+import { join, dirname } from 'node:path'
+import { existsSync } from 'node:fs'
+import { tools } from './tools.js'
+
+const DATA_DIR = process.env.APP_DATA_DIR || join(process.env.HOME || '.', '.<app-name>/data')
+
+// ── File storage (same implementation as serve.ts) ─────────────────
+
+function keyToPath(key: string): string {
+  const safe = key.replace(/\.\./g, '').replace(/^\/+/, '')
+  return join(DATA_DIR, `${safe}.json`)
+}
+
+const storage = {
+  async get(key: string): Promise<any> {
+    try {
+      const raw = await readFile(keyToPath(key), 'utf-8')
+      return JSON.parse(raw)
+    } catch {
+      return null
+    }
+  },
+
+  async put(key: string, value: any): Promise<void> {
+    const filePath = keyToPath(key)
+    await mkdir(dirname(filePath), { recursive: true })
+    await writeFile(filePath, JSON.stringify(value, null, 2))
+  },
+
+  async list(options?: { prefix?: string }): Promise<Map<string, any>> {
+    const prefix = options?.prefix || ''
+    const result = new Map<string, any>()
+    const baseDir = join(DATA_DIR, prefix.replace(/\.\./g, ''))
+
+    async function walk(dir: string): Promise<void> {
+      if (!existsSync(dir)) return
+      const entries = await readdir(dir, { withFileTypes: true })
+      for (const entry of entries) {
+        const full = join(dir, entry.name)
+        if (entry.isDirectory()) {
+          await walk(full)
+        } else if (entry.name.endsWith('.json')) {
+          const key = full
+            .replace(DATA_DIR + '/', '')
+            .replace(/\.json$/, '')
+          if (key.startsWith(prefix)) {
+            try {
+              const raw = await readFile(full, 'utf-8')
+              result.set(key, JSON.parse(raw))
+            } catch { /* skip corrupt files */ }
+          }
+        }
+      }
+    }
+
+    await walk(baseDir || DATA_DIR)
+    return result
+  },
+
+  async delete(key: string): Promise<boolean> {
+    try {
+      await unlink(keyToPath(key))
+      return true
+    } catch {
+      return false
+    }
+  },
+}
+
+// ── JSON Schema → Zod bridge ───────────────────────────────────────
+
+function jsonPropToZod(prop: { type: string; description?: string; enum?: string[] }): z.ZodTypeAny {
+  let schema: z.ZodTypeAny
+  if (prop.enum) {
+    schema = z.enum(prop.enum as [string, ...string[]])
+  } else {
+    schema = z.string()
+  }
+  if (prop.description) {
+    schema = schema.describe(prop.description)
+  }
+  return schema
+}
+
+function buildZodShape(tool: typeof tools[number]): Record<string, z.ZodTypeAny> {
+  const shape: Record<string, z.ZodTypeAny> = {}
+  const required = new Set(tool.inputSchema.required || [])
+
+  for (const [key, prop] of Object.entries(tool.inputSchema.properties)) {
+    const zodProp = jsonPropToZod(prop)
+    shape[key] = required.has(key) ? zodProp : zodProp.optional()
+  }
+  return shape
+}
+
+// ── MCP server ─────────────────────────────────────────────────────
+
+const server = new McpServer({
+  name: '<app-name>',
+  version: '1.0.0',
+})
+
+const ctx = { userId: 'default', storage }
+
+for (const tool of tools) {
+  const zodShape = buildZodShape(tool)
+
+  server.tool(
+    tool.name,
+    tool.description,
+    zodShape,
+    async (params) => {
+      const result = await tool.handler(params, ctx)
+      return { content: result.content, isError: result.isError }
+    },
+  )
+}
+
+const transport = new StdioServerTransport()
+await server.connect(transport)
+```
+
 ## Local Server Entry Point (src/serve.ts)
 
-The serve.ts file is a self-contained local server. It includes an inline file storage adapter so the app has zero framework dependencies — just Node.js stdlib.
+The serve.ts file is a self-contained HTTP server for development and testing. It includes the same inline file storage adapter. See the serve.ts pattern below — follow it exactly.
 
 ```typescript
 import { createServer, IncomingMessage, ServerResponse } from 'node:http'
@@ -258,6 +395,71 @@ server.listen(PORT, () => {
   console.log(`Invoke: POST http://localhost:${PORT}/tool/<name>`)
 })
 ```
+
+## README.md
+
+Generate a README.md with these sections:
+
+````markdown
+# <App Name>
+
+<One-line description of what the app does.>
+
+## Install
+
+```bash
+cd scaffold/examples/<app-name>
+npm install
+```
+
+## Use with Claude Desktop
+
+Add to your Claude Desktop config (`~/.config/claude/claude_desktop_config.json` on Linux, `~/Library/Application Support/Claude/claude_desktop_config.json` on macOS):
+
+```json
+{
+  "mcpServers": {
+    "<app-name>": {
+      "command": "npx",
+      "args": ["tsx", "/absolute/path/to/scaffold/examples/<app-name>/src/mcp.ts"]
+    }
+  }
+}
+```
+
+Restart Claude Desktop. The tools will appear automatically.
+
+## Use with Claude Code
+
+```bash
+claude mcp add <app-name> -- npx tsx /absolute/path/to/scaffold/examples/<app-name>/src/mcp.ts
+```
+
+## Tools
+
+| Tool | Description |
+|------|-------------|
+| `<app>:create` | ... |
+| `<app>:list` | ... |
+
+## Development
+
+```bash
+npm run dev          # HTTP server with watch mode
+npm run typecheck    # Type check
+npm test             # Run tests
+```
+
+Test with curl:
+```bash
+curl http://localhost:3001/tools
+curl -X POST http://localhost:3001/tool/<app>:create -H 'Content-Type: application/json' -d '{"field": "value"}'
+```
+
+## Data Storage
+
+Data is stored as JSON files in `~/.&lt;app-name&gt;/data/` (MCP mode) or `.scaffold/data/` (HTTP dev mode).
+````
 
 ## Test Pattern
 

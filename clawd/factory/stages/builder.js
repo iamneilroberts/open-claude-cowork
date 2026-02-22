@@ -71,20 +71,27 @@ Create these files under ${appDir}/:
 Standard Node.js package with:
 - name: "@scaffold/${appName}"
 - Scripts: start ("npx tsx src/serve.ts"), dev ("npx tsx --watch src/serve.ts"), typecheck ("tsc --noEmit"), test ("vitest run")
-- Dependencies: zod
+- Dependencies: @modelcontextprotocol/sdk, zod
 - DevDependencies: typescript, vitest, tsx
 
 ### 2. tsconfig.json
 Standard TypeScript config (standalone, no base extends needed).
 
-### 3. src/serve.ts
-Local server entry point that:
-- Includes an inline file-based storage adapter (JSON files in .scaffold/data/)
+### 3. src/mcp.ts (PRIMARY ENTRY POINT)
+MCP server over stdio — this is what chat clients (Claude Desktop, Claude Code, Cursor) connect to:
+- Registers tools using McpServer from @modelcontextprotocol/sdk
+- Converts JSON Schema properties to Zod schemas for the SDK
+- Includes inline file-based storage (JSON files in ~/.<app-name>/data/)
+- See the build prompt for the full mcp.ts pattern — follow it exactly
+
+### 4. src/serve.ts
+HTTP server for development and testing with curl:
+- Includes inline file-based storage (JSON files in .scaffold/data/)
 - Creates an HTTP server with POST /tool/:name and GET /tools routes
 - Imports tools from ./tools
 - See the build prompt for the full serve.ts pattern — follow it exactly
 
-### 4. src/tools.ts (MOST IMPORTANT)
+### 5. src/tools.ts (MOST IMPORTANT)
 The actual tool implementations. Each tool must:
 - Export a ScaffoldTool-compatible object with: name, description, inputSchema (JSON Schema), handler(input, ctx)
 - Use ctx.storage.get(key) / ctx.storage.put(key, value) / ctx.storage.list(prefix) / ctx.storage.delete(key) for persistence
@@ -93,11 +100,20 @@ The actual tool implementations. Each tool must:
 - Include input validation with clear error messages
 - Name tools as "${appName}:<action>" (e.g., "${appName}:create", "${appName}:list")
 
-### 5. src/__tests__/tools.test.ts
+### 6. src/__tests__/tools.test.ts
 Vitest tests that:
 - Mock the storage context
 - Test each tool's handler directly
 - Cover happy path, edge cases, and error cases
+
+### 7. README.md
+Documentation with:
+- What the app does (one line)
+- Install instructions (npm install)
+- How to add to Claude Desktop (MCP config JSON with npx tsx path)
+- How to add to Claude Code (claude mcp add command)
+- Tools table (name + description for each tool)
+- Development instructions (dev server, typecheck, test, curl examples)
 
 ## After Creating Files
 
