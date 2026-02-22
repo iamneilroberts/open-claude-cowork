@@ -61,7 +61,7 @@ ${buildPrompt}
 
 - **App name:** ${appName}
 - **Output directory:** ${appDir}
-- **App should be a Cloudflare Worker with Durable Objects for KV storage**
+- **App should run locally with Node.js using file-based JSON storage**
 
 ## What You Must Create
 
@@ -70,26 +70,21 @@ Create these files under ${appDir}/:
 ### 1. package.json
 Standard Node.js package with:
 - name: "@scaffold/${appName}"
-- Scripts: dev, deploy, typecheck, test
-- Dependencies: @scaffold/core (workspace:*), hono, zod
-- DevDependencies: typescript, vitest, wrangler, @cloudflare/workers-types
+- Scripts: start ("npx tsx src/serve.ts"), dev ("npx tsx --watch src/serve.ts"), typecheck ("tsc --noEmit"), test ("vitest run")
+- Dependencies: zod
+- DevDependencies: typescript, vitest, tsx
 
-### 2. wrangler.toml
-Cloudflare Workers config with:
-- name = "${appName}"
-- A durable_objects binding named STORAGE
-- A migration tag
+### 2. tsconfig.json
+Standard TypeScript config (standalone, no base extends needed).
 
-### 3. tsconfig.json
-Standard TypeScript config extending a base or standalone.
-
-### 4. src/index.ts
-Entry point that:
+### 3. src/serve.ts
+Local server entry point that:
+- Includes an inline file-based storage adapter (JSON files in .scaffold/data/)
+- Creates an HTTP server with POST /tool/:name and GET /tools routes
 - Imports tools from ./tools
-- Creates an MCP server using the scaffold pattern
-- Exports the Durable Object class
+- See the build prompt for the full serve.ts pattern — follow it exactly
 
-### 5. src/tools.ts (MOST IMPORTANT)
+### 4. src/tools.ts (MOST IMPORTANT)
 The actual tool implementations. Each tool must:
 - Export a ScaffoldTool-compatible object with: name, description, inputSchema (JSON Schema), handler(input, ctx)
 - Use ctx.storage.get(key) / ctx.storage.put(key, value) / ctx.storage.list(prefix) / ctx.storage.delete(key) for persistence
@@ -98,7 +93,7 @@ The actual tool implementations. Each tool must:
 - Include input validation with clear error messages
 - Name tools as "${appName}:<action>" (e.g., "${appName}:create", "${appName}:list")
 
-### 6. src/__tests__/tools.test.ts
+### 5. src/__tests__/tools.test.ts
 Vitest tests that:
 - Mock the storage context
 - Test each tool's handler directly
