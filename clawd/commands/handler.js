@@ -1,3 +1,5 @@
+import FactoryHandler from './factory-handler.js'
+
 /**
  * Slash command handler for Clawd
  * Processes commands like /new, /reset, /status, /memory
@@ -5,6 +7,7 @@
 export default class CommandHandler {
   constructor(gateway) {
     this.gateway = gateway
+    this.factoryHandler = new FactoryHandler(gateway)
   }
 
   /**
@@ -59,6 +62,10 @@ export default class CommandHandler {
 
       case 'stop':
         return this.handleStop(sessionKey)
+
+      case 'scout': case 'build': case 'test': case 'judge':
+      case 'docs': case 'publish': case 'factory':
+        return this.factoryHandler.execute(command, args, sessionKey, adapter, chatId)
 
       default:
         // Unknown command, pass to agent
@@ -209,7 +216,15 @@ export default class CommandHandler {
       '`/memory search <query>` - Search memories',
       '`/queue` - Show queue status',
       '`/stop` - Stop current operation',
-      '`/help` - Show this help'
+      '`/help` - Show this help',
+      '',
+      '*App Factory:*',
+      '`/scout` - Scout for app ideas',
+      '`/scout pick <N>` - Pick an idea',
+      '`/build` - Build selected idea',
+      '`/build approve` - Approve build',
+      '`/test` - Run persona tests',
+      '`/factory` - Factory status'
     ]
 
     return {
