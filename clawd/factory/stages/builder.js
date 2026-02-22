@@ -98,7 +98,7 @@ The actual tool implementations. Each tool must:
 - Prefix all storage keys with the userId: \`\${ctx.userId}/\` for data isolation
 - Return { content: [{ type: 'text', text: '...' }] } from handler
 - Include input validation with clear error messages
-- Name tools as "${appName}:<action>" (e.g., "${appName}:create", "${appName}:list")
+- Name tools as "${appName}_<action>" (e.g., "${appName}_create", "${appName}_list") — underscores, NOT colons (MCP spec requires ^[a-zA-Z0-9_-]{1,64}$)
 
 ### 6. src/__tests__/tools.test.ts
 Vitest tests that:
@@ -133,7 +133,7 @@ After building, respond with EXACTLY this JSON:
   "appName": "${appName}",
   "appPath": "${appDir}",
   "toolCount": 5,
-  "tools": ["${appName}:create", "${appName}:list"],
+  "tools": ["${appName}_create", "${appName}_list"],
   "testsPass": true,
   "typecheckPass": true,
   "iterations": 1,

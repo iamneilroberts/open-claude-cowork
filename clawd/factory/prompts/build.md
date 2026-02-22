@@ -16,7 +16,7 @@ Each tool follows this pattern:
 
 ```typescript
 interface ScaffoldTool {
-  name: string           // Format: "appname:action" (e.g., "notes:create")
+  name: string           // Format: "appname_action" (e.g., "notes_create")
   description: string    // Clear description for LLM consumption
   inputSchema: {         // JSON Schema for tool parameters
     type: 'object'
@@ -55,7 +55,7 @@ await ctx.storage.put(key, data)
 
 ```typescript
 export const createNote: ScaffoldTool = {
-  name: 'notes:create',
+  name: 'notes_create',
   description: 'Create a new note with a title and content',
   inputSchema: {
     type: 'object',
@@ -98,7 +98,7 @@ export const createNote: ScaffoldTool = {
 1. **Input validation**: Validate all required fields, return clear error messages with `isError: true`
 2. **ID generation**: Use `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
 3. **Timestamps**: Always include `createdAt` and `updatedAt` on stored records
-4. **Tool naming**: Use `appname:action` format — verbs like create, list, get, update, delete, search
+4. **Tool naming**: Use `appname_action` format — verbs like create, list, get, update, delete, search
 5. **Descriptions**: Write tool descriptions as instructions to an LLM: "Create a new X with Y and Z"
 6. **List operations**: Support optional search/filter parameters, return count in response
 7. **Delete operations**: Return confirmation of what was deleted, handle "not found" gracefully
