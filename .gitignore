@@ -142,3 +142,7 @@ vite.config.ts.timestamp-*
 
 .DS_Store
 .worktrees/
+
+# Local config with secrets (use .example files as templates)
+clawd/config.js
+server/opencode.json
