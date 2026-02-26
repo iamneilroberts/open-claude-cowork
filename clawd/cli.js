@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 
+import dotenv from 'dotenv'
 import { createInterface } from 'readline'
 import { existsSync, readFileSync, writeFileSync, readdirSync } from 'fs'
 import { fileURLToPath } from 'url'
@@ -7,6 +8,7 @@ import path from 'path'
 import { execSync } from 'child_process'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
+dotenv.config({ path: path.resolve(__dirname, '../.env') })
 const CONFIG_PATH = path.join(__dirname, 'config.js')
 
 const rl = createInterface({
