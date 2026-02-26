@@ -9,7 +9,7 @@ You are scouting for MCP tool app ideas. An MCP (Model Context Protocol) tool ap
 - **KV storage fit**: Data can be stored as key-value pairs (not relational joins, not streaming data)
 - **Chat-native UX**: The tool enhances conversation naturally (user says something, tool does something useful)
 - **Stateful**: Needs to persist data across conversations (not just a calculator or formatter)
-- **No external APIs required**: Should work without API keys or third-party service accounts
+- **No paid APIs or complex auth**: Avoid apps requiring paid API keys or OAuth flows. Free public APIs (Discogs, TMDB, Wikipedia, public data) are encouraged — they enable richer tools
 
 ### Should Have
 - **Clear CRUD pattern**: Create, Read, Update, Delete operations map naturally
@@ -19,9 +19,9 @@ You are scouting for MCP tool app ideas. An MCP (Model Context Protocol) tool ap
 
 ### Avoid
 - Apps that need real-time data feeds (stock prices, weather)
-- Apps requiring complex auth flows (OAuth, API keys)
+- Apps requiring paid APIs or complex auth flows (OAuth, paid API keys)
 - Apps that duplicate existing scaffold examples: notes, travel planning, BBQ tracker, local guides, watch recommender
-- Apps that are really just wrappers around existing APIs
+- Apps that are really just thin wrappers around a single API with no user-owned state
 - Apps that need media/file storage (images, videos, documents)
 
 ## Scoring Rubric
@@ -53,3 +53,25 @@ You are scouting for MCP tool app ideas. An MCP (Model Context Protocol) tool ap
 - 3: Similar things exist but this has a unique angle
 - 2: Close to existing tools with minor differentiation
 - 1: Direct duplicate of existing scaffold app
+
+### Scaffold Fit (1-5)
+
+How well does the underlying need map to an MCP tool built on the scaffold framework?
+
+- 5: Pure CRUD with KV storage — driving hours log, collection catalog, checkbook register, reading log
+- 4: CRUD + free external API enrichment — Discogs-powered music catalog, TMDB-powered recommender, public data lookups
+- 3: Core need fits but secondary features don't translate well — apps with charts, visual calendars, or dashboards (chat can do the data, not the visualization)
+- 2: Underlying need requires UI that can't replicate in chat — play diagramming, route mapping, visual scheduling
+- 1: Fundamentally visual/auditory — games, media editors, GPS navigation, music players
+
+**Ideas with scaffold_fit < 3 are not eligible regardless of other scores.**
+
+Free external APIs (Discogs, TMDB, Wikipedia, OpenLibrary, etc.) are a plus, not a penalty — they enable richer, more useful tools.
+
+## Source-Specific Guidance
+
+### App Store Source
+When ideas come from the iOS App Store:
+- The **sourceQuote** should be the top user complaint from reviews (if reviews are available), or a representative line from the app description if reviews are unavailable
+- The **sourceUrl** should be the App Store listing URL: `https://apps.apple.com/us/app/id{trackId}`
+- Note the app's rating count and last update date as evidence of demand + abandonment

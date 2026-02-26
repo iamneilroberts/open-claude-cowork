@@ -1,5 +1,6 @@
 import store from '../store.js'
 import pipeline from '../pipeline.js'
+import { buildAppStoreCommands, buildReviewCommands, parseAppStoreResponse, buildAppStoreSection } from './app-store-scout.js'
 import fs from 'fs'
 import path from 'path'
 import { fileURLToPath } from 'url'
@@ -65,6 +66,27 @@ export async function runScout(agent, cycleId, mcpServers) {
     hnCommands.push(...buildHackerNewsCommands())
   }
 
+  // App Store sources
+  let appStoreSection = ''
+  let appStoreCommands = null
+  const appStoreConfig = config.scoutSources.appStore
+  if (appStoreConfig?.enabled) {
+    const cache = store.getAppStoreCache()
+    const result = buildAppStoreCommands(appStoreConfig, cache)
+    appStoreCommands = result
+    if (result.commands.length > 0 || result.cachedOpps.length > 0) {
+      // Build review commands for any cached high-fit opportunities that lack reviews
+      const candidateIds = result.cachedOpps
+        .filter(o => o.mcpFitScore >= 4 && !o.recentAvgRating)
+        .map(o => o.appId)
+        .slice(0, 5)
+      const reviewCmds = buildReviewCommands(candidateIds)
+      appStoreSection = buildAppStoreSection(
+        result.commands, result.freshTerms, result.cachedOpps, reviewCmds, appStoreConfig
+      )
+    }
+  }
+
   const existingApps = config.existingApps.join(', ')
   const scoutPrompt = getScoutPrompt()
 
@@ -107,6 +129,7 @@ Use \`exec\` or shell commands to run curl and jq. Do NOT use browser tools — 
 
 ${redditSection}
 ${hnSection}
+${appStoreSection}
 
 ## Existing Apps (avoid duplicating these)
 ${existingApps}
@@ -163,6 +186,30 @@ Return exactly 5 ideas ranked by total score (highest first). Only include ideas
 
     // Parse the JSON response
     const ideas = parseScoutResponse(response)
+
+    // Parse and persist App Store opportunities (JS owns cache writes)
+    if (appStoreConfig?.enabled && appStoreCommands) {
+      const appStoreOpps = parseAppStoreResponse(response)
+      if (appStoreOpps && appStoreOpps.length > 0) {
+        const scannedTerms = {}
+        const now = new Date().toISOString()
+        for (const term of appStoreCommands.freshTerms) {
+          scannedTerms[term] = now
+        }
+        store.updateAppStoreCache(appStoreOpps, scannedTerms)
+        console.log(`[Factory Scout] Cached ${appStoreOpps.length} App Store opportunities`)
+      } else {
+        // Still mark terms as scanned even if no opportunities found
+        const scannedTerms = {}
+        const now = new Date().toISOString()
+        for (const term of appStoreCommands.freshTerms) {
+          scannedTerms[term] = now
+        }
+        if (Object.keys(scannedTerms).length > 0) {
+          store.updateAppStoreCache([], scannedTerms)
+        }
+      }
+    }
 
     if (!ideas || ideas.length === 0) {
       store.updateCycle(cycleId, { ideas: [], buildLog: [...(cycle.buildLog || []), 'Scout found no ideas'] })
@@ -269,4 +316,158 @@ export function formatIdeas(ideas) {
   }).join('\n\n')
 }
 
-export default { runScout, pickIdea, formatIdeas }
+/**
+ * Run App Store scouting only (no Reddit/HN).
+ * Used by /scout appstore command.
+ *
+ * @param {Object} agent - ClaudeAgent instance
+ * @param {string} cycleId - Current cycle ID
+ * @param {Object} mcpServers - MCP servers
+ * @param {{ forceRefresh?: boolean }} options
+ * @returns {Object} scouting results with App Store opportunities
+ */
+export async function runAppStoreScout(agent, cycleId, mcpServers, { forceRefresh = false } = {}) {
+  const config = store.getConfig()
+  const cycle = store.getCycle(cycleId)
+  if (!cycle) throw new Error(`Cycle ${cycleId} not found`)
+
+  const appStoreConfig = config.scoutSources.appStore || {}
+  let cache = store.getAppStoreCache()
+
+  // If forceRefresh, clear scanned terms so all terms are re-fetched
+  if (forceRefresh) {
+    cache = { ...cache, scannedTerms: {} }
+  }
+
+  const result = buildAppStoreCommands({ ...appStoreConfig, enabled: true }, cache)
+  if (result.commands.length === 0 && result.cachedOpps.length === 0) {
+    return { success: true, opportunities: [], message: 'All terms cached and no opportunities found.' }
+  }
+
+  // Build review commands for high-fit cached opps
+  const candidateIds = result.cachedOpps
+    .filter(o => o.mcpFitScore >= 4 && !o.recentAvgRating)
+    .map(o => o.appId)
+    .slice(0, 5)
+  const reviewCmds = buildReviewCommands(candidateIds)
+
+  const appStoreSection = buildAppStoreSection(
+    result.commands, result.freshTerms, result.cachedOpps, reviewCmds, appStoreConfig
+  )
+
+  const existingApps = config.existingApps.join(', ')
+  const scoutPrompt = getScoutPrompt()
+
+  const message = `You are the Scout stage of the Scaffold App Factory. Your job is to find MCP tool app opportunities by analyzing iOS App Store data.
+
+## Instructions
+
+${scoutPrompt}
+
+## Data Sources
+
+Use \`exec\` or shell commands to run curl. Do NOT use browser tools — use the APIs directly.
+
+${appStoreSection}
+
+## Existing Apps (avoid duplicating these)
+${existingApps}
+
+## Process
+
+1. Fetch app data for each search term using the curl commands above
+2. Analyze each app for abandonment signals (old last-update, low ratings with high count)
+3. For each candidate, assess whether the underlying need maps to an MCP tool (scaffold_fit score)
+4. If review commands are provided, fetch reviews (best-effort) and extract complaints
+5. Score and rank the opportunities
+
+## Output Format
+
+After analyzing all sources, respond with EXACTLY this JSON structure (no other text before or after):
+
+\`\`\`json
+{
+  "opportunities": [
+    {
+      "appId": 699534935,
+      "appName": "RoadReady",
+      "genre": "Education",
+      "allTimeRating": 2.08,
+      "recentAvgRating": null,
+      "ratingDrift": null,
+      "ratingCount": 3282,
+      "monthsAbandoned": 25,
+      "complaints": [],
+      "mcpFitScore": 5,
+      "mcpOpportunity": "Student driving hours log: tools for log-drive, get-total-hours, export-summary",
+      "searchTerm": "driving log"
+    }
+  ]
+}
+\`\`\`
+
+Return up to 10 opportunities ranked by mcpFitScore (highest first). Only include opportunities with scaffold_fit >= 3.`
+
+  console.log(`[Factory Scout] App Store scan: ${result.commands.length} fresh terms, ${result.cachedOpps.length} cached opportunities`)
+
+  const sessionKey = `factory:scout:appstore:${cycleId}`
+
+  try {
+    const response = await agent.runAndCollect({
+      message,
+      sessionKey,
+      platform: 'factory',
+      mcpServers
+    })
+
+    const appStoreOpps = parseAppStoreResponse(response)
+
+    // Persist to cache (JS owns writes)
+    const scannedTerms = {}
+    const now = new Date().toISOString()
+    for (const term of result.freshTerms) {
+      scannedTerms[term] = now
+    }
+    if (appStoreOpps && appStoreOpps.length > 0) {
+      store.updateAppStoreCache(appStoreOpps, scannedTerms)
+    } else if (Object.keys(scannedTerms).length > 0) {
+      store.updateAppStoreCache([], scannedTerms)
+    }
+
+    const oppCount = appStoreOpps?.length || 0
+    console.log(`[Factory Scout] App Store scan found ${oppCount} opportunities`)
+
+    return {
+      success: true,
+      opportunities: appStoreOpps || [],
+      cached: result.cachedOpps.length,
+      freshTermsScanned: result.freshTerms.length
+    }
+  } catch (err) {
+    console.error('[Factory Scout] App Store error:', err.message)
+    return { success: false, reason: err.message }
+  }
+}
+
+/**
+ * Format App Store opportunities for display.
+ */
+export function formatAppStoreOpps(opportunities) {
+  if (!opportunities || opportunities.length === 0) return 'No App Store opportunities found.'
+
+  return opportunities.map((opp, i) => {
+    const rating = opp.allTimeRating != null ? `${opp.allTimeRating}/5` : 'N/A'
+    const abandoned = opp.monthsAbandoned != null ? `${opp.monthsAbandoned}mo abandoned` : ''
+    const drift = opp.ratingDrift != null ? `drift: ${opp.ratingDrift}` : ''
+    const meta = [rating, `${opp.ratingCount || '?'} ratings`, abandoned, drift].filter(Boolean).join(', ')
+
+    return [
+      `${i + 1}. ${opp.appName} (fit: ${opp.mcpFitScore}/5)`,
+      `   ${opp.mcpOpportunity}`,
+      `   ${meta}`,
+      opp.complaints?.length ? `   Complaints: ${opp.complaints.slice(0, 3).join('; ')}` : ''
+    ].filter(Boolean).join('\n')
+  }).join('\n\n')
+}
+
+export default { runScout, runAppStoreScout, pickIdea, formatIdeas, formatAppStoreOpps }

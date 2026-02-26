@@ -1,6 +1,6 @@
 import store from '../factory/store.js'
 import pipeline from '../factory/pipeline.js'
-import { runScout, pickIdea, formatIdeas } from '../factory/stages/scout.js'
+import { runScout, runAppStoreScout, pickIdea, formatIdeas, formatAppStoreOpps } from '../factory/stages/scout.js'
 import { runBuilder, approveBuild, rejectBuild } from '../factory/stages/builder.js'
 import { runTester, formatTestResults } from '../factory/stages/tester.js'
 
@@ -42,6 +42,11 @@ export default class FactoryHandler {
   }
 
   async handleScout(args, sessionKey, adapter, chatId) {
+    // /scout appstore — App Store scouting commands
+    if (args === 'appstore' || args.startsWith('appstore ')) {
+      return await this.handleScoutAppStore(args, sessionKey, adapter, chatId)
+    }
+
     // /scout pick N — approve an idea
     if (args.startsWith('pick ')) {
       const n = parseInt(args.split(' ')[1])
@@ -100,6 +105,75 @@ export default class FactoryHandler {
         formatted,
         '',
         'Pick an idea: /scout pick <number>'
+      ].join('\n')
+    }
+  }
+
+  async handleScoutAppStore(args, sessionKey, adapter, chatId) {
+    const subCommand = args.replace('appstore', '').trim()
+
+    // /scout appstore cache — show cached opportunities
+    if (subCommand === 'cache') {
+      const cache = store.getAppStoreCache()
+      if (!cache.opportunities.length) {
+        return { handled: true, response: 'No cached App Store opportunities. Run /scout appstore to scan.' }
+      }
+      const termCount = Object.keys(cache.scannedTerms).length
+      return {
+        handled: true,
+        response: [
+          `App Store Cache (${cache.opportunities.length} opportunities, ${termCount} terms scanned):`,
+          `Last updated: ${cache.updatedAt || 'never'}`,
+          '',
+          formatAppStoreOpps(cache.opportunities)
+        ].join('\n')
+      }
+    }
+
+    // /scout appstore refresh — force re-scan all terms
+    // /scout appstore — normal scan (uses cache)
+    const forceRefresh = subCommand === 'refresh'
+
+    let cycle = store.getActiveCycle()
+    if (!cycle) {
+      cycle = store.createCycle()
+    }
+
+    if (adapter && chatId) {
+      await adapter.sendMessage(chatId, `Scanning App Store${forceRefresh ? ' (full refresh)' : ''}... (cycle: ${cycle.cycleId})`)
+    }
+
+    const agent = this.gateway.agentRunner.agent
+    const mcpServers = this.gateway.mcpServers
+
+    const result = await runAppStoreScout(agent, cycle.cycleId, mcpServers, { forceRefresh })
+
+    if (!result.success) {
+      return { handled: true, response: `App Store scan failed: ${result.reason}` }
+    }
+
+    const allOpps = [...result.opportunities, ...(store.getAppStoreCache().opportunities || [])]
+    // Dedupe by appId
+    const seen = new Set()
+    const unique = allOpps.filter(o => {
+      if (seen.has(o.appId)) return false
+      seen.add(o.appId)
+      return true
+    })
+
+    return {
+      handled: true,
+      response: [
+        `App Store scan complete:`,
+        `  Fresh terms scanned: ${result.freshTermsScanned}`,
+        `  New opportunities: ${result.opportunities.length}`,
+        `  Cached: ${result.cached}`,
+        '',
+        formatAppStoreOpps(unique.slice(0, 10)),
+        '',
+        'Commands:',
+        '  /scout appstore cache — view all cached opportunities',
+        '  /scout appstore refresh — force full re-scan'
       ].join('\n')
     }
   }
@@ -293,6 +367,7 @@ export default class FactoryHandler {
           '',
           `  Reddit subs: ${config.scoutSources.reddit.join(', ')}`,
           `  Hacker News: ${config.scoutSources.hackerNews ? 'enabled' : 'disabled'}`,
+          `  App Store: ${config.scoutSources.appStore?.enabled ? 'enabled' : 'disabled'}`,
           `  Product Hunt: ${config.scoutSources.productHunt ? 'enabled' : 'disabled'}`,
           `  Persona count: ${config.personaCount}`,
           `  Max build iterations: ${config.maxBuildIterations}`,

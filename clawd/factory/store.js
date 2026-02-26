@@ -5,6 +5,7 @@ import os from 'os'
 const FACTORY_DIR = path.join(os.homedir(), 'clawd', 'factory')
 const CONFIG_FILE = path.join(FACTORY_DIR, 'config.json')
 const CATALOG_FILE = path.join(FACTORY_DIR, 'catalog.json')
+const APP_STORE_CACHE_FILE = path.join(FACTORY_DIR, 'app-store-cache.json')
 const CYCLES_DIR = path.join(FACTORY_DIR, 'cycles')
 const LEARNINGS_DIR = path.join(FACTORY_DIR, 'learnings')
 
@@ -37,7 +38,16 @@ const DEFAULT_CONFIG = {
     ],
     hackerNews: true,
     productHunt: false,
-    twitter: false
+    twitter: false,
+    appStore: {
+      enabled: false,
+      searchTerms: null,  // null = use DEFAULT_TERMS from app-store-scout.js
+      minRatingCount: 200,
+      minMonthsAbandoned: 18,
+      maxDistressRating: 3.2,
+      cacheTermDays: 7,
+      cacheOpportunityDays: 30
+    }
   },
   personaCount: 2,
   maxBuildIterations: 3,
@@ -47,6 +57,9 @@ const DEFAULT_CONFIG = {
     judgingPassScore: 70
   },
   existingApps: ['notes-app', 'travel', 'bbq', 'local-guide', 'watch-recommender'],
+  catalog: {
+    scaffoldRepoPath: path.join(os.homedir(), 'dev', 'scaffold')
+  },
   pauseCron: false
 }
 
@@ -146,7 +159,15 @@ export function getConfig() {
     writeJSON(CONFIG_FILE, DEFAULT_CONFIG)
     return { ...DEFAULT_CONFIG }
   }
-  return { ...DEFAULT_CONFIG, ...config }
+  // Deep merge scoutSources so new defaults (like appStore) aren't lost
+  // when user has customized only some sources
+  return {
+    ...DEFAULT_CONFIG,
+    ...config,
+    scoutSources: { ...DEFAULT_CONFIG.scoutSources, ...(config.scoutSources || {}) },
+    thresholds: { ...DEFAULT_CONFIG.thresholds, ...(config.thresholds || {}) },
+    catalog: { ...DEFAULT_CONFIG.catalog, ...(config.catalog || {}) }
+  }
 }
 
 export function updateConfig(updates) {
@@ -182,9 +203,164 @@ export function saveLearning(type, data) {
   writeJSON(filePath, existing)
 }
 
+const DEFAULT_APP_STORE_CACHE = {
+  schemaVersion: 1,
+  opportunities: [],
+  scannedTerms: {},
+  updatedAt: null
+}
+
+const APP_STORE_CACHE_REQUIRED_FIELDS = ['appId', 'appName', 'mcpFitScore', 'discoveredAt']
+
+export function getAppStoreCache() {
+  const cache = readJSON(APP_STORE_CACHE_FILE)
+  if (!cache || cache.schemaVersion !== 1) {
+    return { ...DEFAULT_APP_STORE_CACHE }
+  }
+  return cache
+}
+
+/**
+ * Atomically update the App Store cache.
+ * Validates required fields before writing. On validation failure,
+ * preserves last-known-good cache.
+ *
+ * @param {Object[]} opportunities - Validated opportunity objects
+ * @param {Object} scannedTerms - Map of term -> ISO timestamp
+ * @returns {Object} Updated cache
+ */
+export function updateAppStoreCache(opportunities, scannedTerms) {
+  const existing = getAppStoreCache()
+
+  // Validate all opportunities have required fields
+  const valid = opportunities.filter(opp => {
+    return APP_STORE_CACHE_REQUIRED_FIELDS.every(field => opp[field] != null)
+  })
+
+  if (valid.length !== opportunities.length) {
+    console.warn(`[Factory Store] Dropped ${opportunities.length - valid.length} invalid app store opportunities`)
+  }
+
+  // Merge: upsert by appId, keep existing that aren't being replaced
+  const byId = new Map()
+  for (const opp of existing.opportunities) {
+    byId.set(opp.appId, opp)
+  }
+  for (const opp of valid) {
+    byId.set(opp.appId, opp)
+  }
+
+  const mergedTerms = { ...existing.scannedTerms, ...scannedTerms }
+
+  const cache = {
+    schemaVersion: 1,
+    opportunities: Array.from(byId.values()),
+    scannedTerms: mergedTerms,
+    updatedAt: new Date().toISOString()
+  }
+
+  // Atomic write: temp file + rename
+  ensureDir(path.dirname(APP_STORE_CACHE_FILE))
+  const tmpFile = APP_STORE_CACHE_FILE + '.tmp'
+  try {
+    fs.writeFileSync(tmpFile, JSON.stringify(cache, null, 2))
+    fs.renameSync(tmpFile, APP_STORE_CACHE_FILE)
+  } catch (err) {
+    console.error('[Factory Store] Failed to write app store cache:', err.message)
+    // Clean up temp file if rename failed
+    try { fs.unlinkSync(tmpFile) } catch { /* ignore */ }
+    return existing // Preserve last-known-good
+  }
+
+  return cache
+}
+
+/**
+ * Publish a completed cycle's app to the scaffold catalog.
+ * Reads existing catalog.json from the scaffold repo, upserts the entry, writes back.
+ *
+ * @param {Object} cycle - Completed cycle state
+ * @param {string} scaffoldRepoPath - Path to scaffold repo (default from config)
+ * @returns {{ success: boolean, catalogPath: string, error?: string }}
+ */
+export function publishToCatalog(cycle, scaffoldRepoPath) {
+  const config = getConfig()
+  const repoPath = scaffoldRepoPath || config.catalog?.scaffoldRepoPath
+  if (!repoPath) {
+    return { success: false, error: 'No scaffoldRepoPath configured' }
+  }
+
+  const catalogPath = path.join(repoPath, 'docs', 'catalog', 'catalog.json')
+
+  // Read existing catalog
+  let catalog = readJSON(catalogPath, { apps: [], updatedAt: null })
+
+  // Map cycle to AppEntry
+  const entry = {
+    name: cycle.appName,
+    displayName: cycle.idea?.title || cycle.appName,
+    icon: cycle.idea?.icon || '🔧',
+    version: '0.0.1',
+    category: cycle.idea?.category || 'utilities',
+    tags: cycle.idea?.tags || [],
+    description: cycle.idea?.summary || '',
+    cycleId: cycle.cycleId,
+    builtAt: cycle.updatedAt || new Date().toISOString(),
+    sourceUrl: `https://github.com/neilopet/scaffold/tree/master/examples/${cycle.appName}`,
+    tools: (cycle.idea?.suggestedTools || []).map(t => ({
+      name: t, description: ''
+    })),
+    quality: {
+      judgeScore: cycle.judgeVerdict?.score ?? null,
+      judgeVerdict: cycle.judgeVerdict?.verdict ?? null,
+      personaPassRate: cycle.testResults?.length
+        ? cycle.testResults.filter(r => r.passed).length / cycle.testResults.length
+        : null,
+      buildIterations: cycle.iterations?.build || 1,
+      guardianPassed: cycle.guardianReport?.passed ?? null,
+      testCount: cycle.testResults?.length || 0
+    },
+    install: {
+      workerUrl: `https://scaffold-${cycle.appName}.neilopet.workers.dev`,
+      requiresAuth: true,
+      mcpConfig: {
+        mcpServers: {
+          [cycle.appName]: {
+            url: `https://scaffold-${cycle.appName}.neilopet.workers.dev/sse?token=YOUR_TOKEN`
+          }
+        }
+      }
+    },
+    status: 'beta'
+  }
+
+  // Upsert
+  const existingIdx = catalog.apps.findIndex(a => a.name === entry.name)
+  if (existingIdx >= 0) {
+    catalog.apps[existingIdx] = entry
+  } else {
+    catalog.apps.push(entry)
+  }
+  catalog.updatedAt = new Date().toISOString()
+
+  // Write atomically
+  ensureDir(path.dirname(catalogPath))
+  const tmpFile = catalogPath + '.tmp'
+  try {
+    fs.writeFileSync(tmpFile, JSON.stringify(catalog, null, 2))
+    fs.renameSync(tmpFile, catalogPath)
+  } catch (err) {
+    return { success: false, catalogPath, error: err.message }
+  }
+
+  return { success: true, catalogPath }
+}
+
 export default {
   createCycle, getCycle, getActiveCycle, updateCycle, listCycles,
   getConfig, updateConfig,
   getCatalog, addToCatalog,
+  getAppStoreCache, updateAppStoreCache,
+  publishToCatalog,
   saveLearning
 }
